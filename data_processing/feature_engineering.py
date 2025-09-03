@@ -359,7 +359,14 @@ def create_feature_vector(match_data: Dict[str, Any], home_team_history: List[Di
     # 4. Factores contextuales del partido
     contextual_factors = _calculate_contextual_factors(match_data)
     
-    # 5. Combinar todas las características
+    # 5. Calcular goles esperados con método Dixon-Coles refinado
+    # Combinar historiales para simular datos de liga (en producción se obtendrían de la API)
+    league_matches = home_team_history + away_team_history
+    dixon_coles_goals = calculate_dixon_coles_expected_goals(
+        home_team_history, away_team_history, league_matches
+    )
+    
+    # 6. Combinar todas las características
     # Renombrar métricas de equipos
     home_metrics = home_metrics.add_prefix('home_')
     away_metrics = away_metrics.add_prefix('away_')
@@ -370,7 +377,8 @@ def create_feature_vector(match_data: Dict[str, Any], home_team_history: List[Di
         away_metrics,
         pd.Series(h2h_stats),
         pd.Series(comparative_metrics),
-        pd.Series(contextual_factors)
+        pd.Series(contextual_factors),
+        pd.Series(dixon_coles_goals)
     ]
     
     feature_vector = pd.concat(all_features)
@@ -515,3 +523,182 @@ def _calculate_contextual_factors(match_data: Dict[str, Any]) -> Dict[str, float
     contextual['competitive_factor'] = 1.0  # Se puede expandir con datos de competitividad
     
     return contextual
+
+
+def calculate_league_averages(league_matches: List[Dict[str, Any]]) -> Dict[str, float]:
+    """
+    Calcula los promedios de goles de la liga para el método Dixon-Coles.
+    
+    Args:
+        league_matches: Lista de partidos de la liga
+        
+    Returns:
+        Diccionario con promedios de la liga
+    """
+    if not league_matches:
+        return {
+            'avg_goals_home': 1.5,
+            'avg_goals_away': 1.2,
+            'avg_goals_total': 2.7
+        }
+    
+    total_home_goals = 0
+    total_away_goals = 0
+    total_matches = 0
+    
+    for match in league_matches:
+        try:
+            home_goals = match.get('goals', {}).get('home', 0)
+            away_goals = match.get('goals', {}).get('away', 0)
+            
+            if home_goals is not None and away_goals is not None:
+                total_home_goals += home_goals
+                total_away_goals += away_goals
+                total_matches += 1
+        except (KeyError, TypeError):
+            continue
+    
+    if total_matches == 0:
+        return {
+            'avg_goals_home': 1.5,
+            'avg_goals_away': 1.2,
+            'avg_goals_total': 2.7
+        }
+    
+    return {
+        'avg_goals_home': total_home_goals / total_matches,
+        'avg_goals_away': total_away_goals / total_matches,
+        'avg_goals_total': (total_home_goals + total_away_goals) / total_matches
+    }
+
+
+def calculate_team_strength_ratios(
+    team_history: List[Dict[str, Any]], 
+    league_averages: Dict[str, float],
+    is_home: bool = True
+) -> Dict[str, float]:
+    """
+    Calcula las ratios de fuerza de ataque y defensa de un equipo
+    en relación al promedio de la liga (método Dixon-Coles).
+    
+    Args:
+        team_history: Historial de partidos del equipo
+        league_averages: Promedios de goles de la liga
+        is_home: Si el equipo juega en casa
+        
+    Returns:
+        Diccionario con ratios de fuerza
+    """
+    if not team_history or not league_averages:
+        return {
+            'attack_strength': 1.0,
+            'defense_strength': 1.0
+        }
+    
+    team_goals_scored = 0
+    team_goals_conceded = 0
+    team_matches = 0
+    
+    for match in team_history:
+        try:
+            team_id = match.get('teams', {}).get('home' if is_home else 'away', {}).get('id')
+            home_goals = match.get('goals', {}).get('home', 0)
+            away_goals = match.get('goals', {}).get('away', 0)
+            
+            if home_goals is None or away_goals is None:
+                continue
+                
+            if is_home:
+                team_goals_scored += home_goals
+                team_goals_conceded += away_goals
+            else:
+                team_goals_scored += away_goals
+                team_goals_conceded += home_goals
+                
+            team_matches += 1
+            
+        except (KeyError, TypeError):
+            continue
+    
+    if team_matches == 0:
+        return {
+            'attack_strength': 1.0,
+            'defense_strength': 1.0
+        }
+    
+    # Calcular promedios del equipo
+    team_avg_goals_scored = team_goals_scored / team_matches
+    team_avg_goals_conceded = team_goals_conceded / team_matches
+    
+    # Calcular ratios de fuerza (Dixon-Coles)
+    league_avg_goals_home = league_averages.get('avg_goals_home', 1.5)
+    league_avg_goals_away = league_averages.get('avg_goals_away', 1.2)
+    
+    if is_home:
+        attack_strength = team_avg_goals_scored / league_avg_goals_home
+        defense_strength = team_avg_goals_conceded / league_avg_goals_away
+    else:
+        attack_strength = team_avg_goals_scored / league_avg_goals_away
+        defense_strength = team_avg_goals_conceded / league_avg_goals_home
+    
+    # Limitar ratios para evitar valores extremos
+    attack_strength = max(0.5, min(2.0, attack_strength))
+    defense_strength = max(0.5, min(2.0, defense_strength))
+    
+    return {
+        'attack_strength': attack_strength,
+        'defense_strength': defense_strength
+    }
+
+
+def calculate_dixon_coles_expected_goals(
+    home_history: List[Dict[str, Any]],
+    away_history: List[Dict[str, Any]],
+    league_matches: List[Dict[str, Any]]
+) -> Dict[str, float]:
+    """
+    Calcula los goles esperados usando el método Dixon-Coles refinado.
+    
+    Args:
+        home_history: Historial del equipo local
+        away_history: Historial del equipo visitante
+        league_matches: Partidos de la liga para calcular promedios
+        
+    Returns:
+        Diccionario con goles esperados refinados
+    """
+    # Calcular promedios de la liga
+    league_averages = calculate_league_averages(league_matches)
+    
+    # Calcular ratios de fuerza de cada equipo
+    home_strength = calculate_team_strength_ratios(home_history, league_averages, is_home=True)
+    away_strength = calculate_team_strength_ratios(away_history, league_averages, is_home=False)
+    
+    # Aplicar fórmula Dixon-Coles
+    home_expected_goals = (
+        home_strength['attack_strength'] * 
+        away_strength['defense_strength'] * 
+        league_averages['avg_goals_home']
+    )
+    
+    away_expected_goals = (
+        away_strength['attack_strength'] * 
+        home_strength['defense_strength'] * 
+        league_averages['avg_goals_away']
+    )
+    
+    # Asegurar valores mínimos
+    home_expected_goals = max(0.1, home_expected_goals)
+    away_expected_goals = max(0.1, away_expected_goals)
+    
+    return {
+        'home_expected_goals': home_expected_goals,
+        'away_expected_goals': away_expected_goals,
+        'total_expected_goals': home_expected_goals + away_expected_goals,
+        'home_attack_strength': home_strength['attack_strength'],
+        'home_defense_strength': home_strength['defense_strength'],
+        'away_attack_strength': away_strength['attack_strength'],
+        'away_defense_strength': away_strength['defense_strength'],
+        'league_avg_goals_home': league_averages['avg_goals_home'],
+        'league_avg_goals_away': league_averages['avg_goals_away']
+    }

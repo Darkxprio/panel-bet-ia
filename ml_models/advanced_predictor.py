@@ -42,7 +42,9 @@ class AdvancedPredictor:
         # Inicializar modelos para diferentes mercados
         self._initialize_models()
         
-        print("🧠 Advanced AI Predictor initialized with ensemble methods.")
+        from utils import get_logger
+        logger = get_logger("ml_models")
+        logger.info("🧠 Advanced AI Predictor initialized with ensemble methods.")
     
     def _initialize_models(self):
         """Inicializa los modelos de ML para cada mercado."""

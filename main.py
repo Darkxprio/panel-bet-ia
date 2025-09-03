@@ -6,6 +6,7 @@ Ejecuta el proceso diario de análisis y predicción de apuestas deportivas.
 
 from datetime import date, datetime, timedelta
 from typing import Dict, Any, List
+import time
 
 from services import api_service, db_service
 from ml_models.predictor import Predictor
@@ -22,7 +23,20 @@ from constants import (
     MSG_NO_ODDS,
     MSG_PARSING_ERROR
 )
-from utils import validate_match_data, validate_odds_data, format_team_names
+from utils import (
+    validate_match_data, 
+    validate_odds_data, 
+    format_team_names,
+    setup_logging,
+    get_logger,
+    log_pipeline_summary,
+    log_prediction_result
+)
+
+# Configurar logging al inicio
+logger = setup_logging("panel_bet_ia", level="INFO")
+api_logger = get_logger("api")
+predictions_logger = get_logger("predictions")
 
 
 def _validate_league_maturity(league_id: int, today: date) -> Dict[str, Any]:
@@ -115,7 +129,7 @@ def _analyze_all_markets(match: Dict, features: Any, initial_bets: List, prob_wi
                 valuable_predictions.append(create_prediction_entry(match, features, 'Goles 1ra Mitad', 'Más de 1.5', best_odds['best_odd'], prob_over_1_5_fh))
     
     except (StopIteration, KeyError, IndexError, ValueError) as e:
-        print(MSG_PARSING_ERROR.format(e))
+        logger.warning(f"⚠️ Error parseando cuotas: {e}")
     
     return valuable_predictions
 
@@ -133,81 +147,126 @@ def run_daily_pipeline():
     6. Busca apuestas de valor
     7. Guarda predicciones
     """
-    print(MSG_PIPELINE_START)
+    start_time = time.time()
+    logger.info("🚀 Iniciando el pipeline de predicción diaria...")
     today = date.today()
     
     # Inicializar predictor
-    predictor = Predictor()
+    try:
+        predictor = Predictor()
+        logger.info("✅ Predictor inicializado correctamente")
+    except Exception as e:
+        logger.error(f"❌ Error inicializando predictor: {e}", exc_info=True)
+        return
     
     # Obtener partidos del día
     fixtures = api_service.get_daily_fixtures(today.strftime("%Y-%m-%d"))
     if not fixtures:
-        print(MSG_NO_MATCHES)
+        logger.warning("⚠️ No se encontraron partidos para hoy. Finalizando.")
         return
 
+    logger.info(f"📅 Procesando {len(fixtures)} partidos para {today}")
     valuable_predictions = []
     league_info_cache = {}
+    analyzed_matches = 0
     
     for match in fixtures:
+        match_id = match.get('fixture', {}).get('id', 'unknown')
+        
         # Validar datos del partido
         if not validate_match_data(match):
-            print(f"  -> Omitiendo: Datos del partido inválidos")
+            logger.warning(f"⚠️ Partido {match_id}: Datos inválidos, omitiendo")
             continue
         
         teams = format_team_names(match)
-        print(f"\nAnalizando: {teams} (ID: {match['fixture']['id']})")
+        logger.info(f"🔍 Analizando: {teams} (ID: {match_id})")
         
-        # Validar madurez de la liga
-        league_id = match['league']['id']
-        league_info = league_info_cache.get(league_id)
-        
-        if not league_info:
-            league_info = _validate_league_maturity(league_id, today)
-            league_info_cache[league_id] = league_info
-        
-        if not league_info['is_valid']:
-            print(MSG_LEAGUE_IMMATURE.format(league_id))
-            continue
-        
-        # Obtener historial de equipos
-        season_year = league_info['season']
-        home_history = api_service.get_team_last_matches(match['teams']['home']['id'], season_year, last_n=20)
-        away_history = api_service.get_team_last_matches(match['teams']['away']['id'], season_year, last_n=20)
-        
-        if len(home_history) < MIN_MATCHES_REQUIRED or len(away_history) < MIN_MATCHES_REQUIRED:
-            print(MSG_INSUFFICIENT_DATA)
-            continue
-        
-        # Generar características
-        features = create_feature_vector(match, home_history, away_history)
-        if features.empty:
-            print(MSG_NO_FEATURES)
-            continue
-        
-        # Obtener cuotas
-        initial_bets = api_service.get_initial_odds(match['fixture']['id'])
-        if not initial_bets or not validate_odds_data(initial_bets):
-            print(MSG_NO_ODDS)
+        try:
+            # Validar madurez de la liga
+            league_id = match['league']['id']
+            league_info = league_info_cache.get(league_id)
+            
+            if not league_info:
+                league_info = _validate_league_maturity(league_id, today)
+                league_info_cache[league_id] = league_info
+            
+            if not league_info['is_valid']:
+                logger.info(f"⏭️ Liga {league_id} no suficientemente madura, omitiendo")
+                continue
+            
+            # Obtener historial de equipos
+            season_year = league_info['season']
+            home_history = api_service.get_team_last_matches(match['teams']['home']['id'], season_year, last_n=20)
+            away_history = api_service.get_team_last_matches(match['teams']['away']['id'], season_year, last_n=20)
+            
+            if len(home_history) < MIN_MATCHES_REQUIRED or len(away_history) < MIN_MATCHES_REQUIRED:
+                logger.info(f"⏭️ {teams}: Datos históricos insuficientes (H:{len(home_history)}, A:{len(away_history)})")
+                continue
+            
+            # Generar características
+            features = create_feature_vector(match, home_history, away_history)
+            if features.empty:
+                logger.warning(f"⚠️ {teams}: No se pudieron generar características")
+                continue
+            
+            logger.debug(f"📊 {teams}: Generadas {len(features)} características")
+            
+            # Obtener cuotas
+            initial_bets = api_service.get_initial_odds(match['fixture']['id'])
+            if not initial_bets or not validate_odds_data(initial_bets):
+                logger.info(f"⏭️ {teams}: Sin cuotas disponibles del bookmaker primario")
+                continue
+
+            # Realizar predicciones
+            logger.debug(f"🤖 {teams}: Generando predicciones...")
+            prob_winner = predictor.predict_winner_probabilities(features)
+            prob_btts = predictor.predict_btts_probability(features)
+            prob_over_2_5 = predictor.predict_over_2_5_probability(features)
+            prob_over_0_5_fh = predictor.predict_over_0_5_fh_probability(features)
+            prob_over_1_5_fh = predictor.predict_over_1_5_fh_probability(features)
+
+            # Analizar mercados en busca de valor
+            logger.debug(f"💰 {teams}: Buscando oportunidades de valor...")
+            market_predictions = _analyze_all_markets(
+                match, features, initial_bets, 
+                prob_winner, prob_btts, prob_over_2_5, prob_over_0_5_fh, prob_over_1_5_fh
+            )
+            
+            if market_predictions:
+                valuable_predictions.extend(market_predictions)
+                logger.info(f"✅ {teams}: {len(market_predictions)} predicciones con valor encontradas")
+            else:
+                logger.debug(f"❌ {teams}: Sin oportunidades de valor")
+            
+            analyzed_matches += 1
+            
+        except Exception as e:
+            logger.error(f"❌ Error procesando {teams} (ID: {match_id}): {e}", exc_info=True)
             continue
 
-        print("  -> Prediciendo probabilidades para todos los mercados...")
-        prob_winner = predictor.predict_winner_probabilities(features)
-        prob_btts = predictor.predict_btts_probability(features)
-        prob_over_2_5 = predictor.predict_over_2_5_probability(features)
-        prob_over_0_5_fh = predictor.predict_over_0_5_fh_probability(features)
-        prob_over_1_5_fh = predictor.predict_over_1_5_fh_probability(features) # <-- NUEVA PREDICCIÓN
-
-        # Analizar mercados en busca de valor
-        print("  -> Analizando mercados en busca de valor...")
-        market_predictions = _analyze_all_markets(match, features, initial_bets, prob_winner, prob_btts, prob_over_2_5, prob_over_0_5_fh, prob_over_1_5_fh)
-        valuable_predictions.extend(market_predictions)
-
+    # Guardar resultados
+    execution_time = time.time() - start_time
+    
     if valuable_predictions:
-        print(f"\n✅ Pipeline completo. Se encontraron {len(valuable_predictions)} apuestas de valor. Guardando...")
-        rows_saved = db_service.save_predictions(valuable_predictions)
-        print(f"✅ Se guardaron exitosamente {rows_saved} nuevas predicciones.")
+        logger.info(f"💾 Guardando {len(valuable_predictions)} predicciones con valor...")
+        try:
+            rows_saved = db_service.save_predictions(valuable_predictions)
+            logger.info(f"✅ Se guardaron exitosamente {rows_saved} predicciones en la base de datos")
+        except Exception as e:
+            logger.error(f"❌ Error guardando predicciones: {e}", exc_info=True)
+            rows_saved = 0
     else:
-        print("\n✅ Pipeline completo. No se encontraron apuestas de valor el día de hoy.")
+        logger.info("ℹ️ No se encontraron apuestas de valor el día de hoy")
+        rows_saved = 0
+    
+    # Log resumen final
+    log_pipeline_summary(
+        total_matches=len(fixtures),
+        analyzed_matches=analyzed_matches,
+        valuable_predictions=len(valuable_predictions),
+        saved_predictions=rows_saved,
+        execution_time=execution_time
+    )
 
 if __name__ == "__main__":
     run_daily_pipeline()

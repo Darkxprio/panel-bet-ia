@@ -3,36 +3,87 @@ from config import API_HOST, API_HEADERS
 from typing import List, Dict, Any
 import time
 from constants import PRIMARY_BOOKMAKER_ID, SECONDARY_BOOKMAKER_IDS, TEAM_HISTORY_MATCHES
+from utils import get_logger, log_api_call
+
+# Logger para API calls
+logger = get_logger("api")
 
 def get_daily_fixtures(date_str: str) -> list:
     url = f"https://{API_HOST}/fixtures"
     params = {"date": date_str}
+    start_time = time.time()
+    
     try:
-        print(f"Buscando partidos para la fecha: {date_str}...")
+        logger.info(f"🔍 Buscando partidos para la fecha: {date_str}")
         response = requests.get(url, headers=API_HEADERS, params=params)
         response.raise_for_status()
+        
+        response_time = time.time() - start_time
         fixtures = response.json().get('response', [])
-        print(f"Se encontraron {len(fixtures)} partidos.")
+        
+        # Log API call
+        log_api_call(
+            endpoint="fixtures",
+            params=params,
+            response_time=response_time,
+            status_code=response.status_code,
+            response_size=len(str(fixtures))
+        )
+        
+        logger.info(f"✅ Encontrados {len(fixtures)} partidos para {date_str}")
         return fixtures
+        
     except requests.exceptions.RequestException as e:
-        print(f"Error al obtener los partidos del día: {e}")
+        response_time = time.time() - start_time
+        logger.error(f"❌ Error obteniendo partidos del día {date_str}: {e}")
+        
+        # Log failed API call
+        log_api_call(
+            endpoint="fixtures", 
+            params=params,
+            response_time=response_time,
+            status_code=getattr(e.response, 'status_code', 0) if hasattr(e, 'response') else 0
+        )
         return []
 
 def get_league_details(league_id: int) -> dict:
     url = f"https://{API_HOST}/leagues"
     params = {"id": str(league_id)}
+    start_time = time.time()
+    
     try:
-        print(f"  -> Obteniendo detalles para la liga ID: {league_id}...")
+        logger.debug(f"📋 Obteniendo detalles para la liga ID: {league_id}")
         response = requests.get(url, headers=API_HEADERS, params=params)
         response.raise_for_status()
         
+        response_time = time.time() - start_time
         league_data = response.json().get('response', [])
+        
+        log_api_call(
+            endpoint="leagues",
+            params=params,
+            response_time=response_time,
+            status_code=response.status_code,
+            response_size=len(str(league_data))
+        )
+        
         if league_data:
+            logger.debug(f"✅ Detalles obtenidos para liga {league_id}")
             return league_data[0]
-        return {}
+        else:
+            logger.warning(f"⚠️ No se encontraron detalles para liga {league_id}")
+            return {}
         
     except requests.exceptions.RequestException as e:
-        print(f"  -> Error al obtener detalles de la liga {league_id}: {e}")
+        response_time = time.time() - start_time
+        logger.error(f"❌ Error obteniendo detalles de liga {league_id}: {e}")
+        
+        log_api_call(
+            endpoint="leagues",
+            params=params,
+            response_time=response_time,
+            status_code=getattr(e.response, 'status_code', 0) if hasattr(e, 'response') else 0
+        )
         return {}
 
 def get_team_last_matches(team_id: int, season: int, last_n: int = TEAM_HISTORY_MATCHES) -> list:
@@ -43,13 +94,15 @@ def get_team_last_matches(team_id: int, season: int, last_n: int = TEAM_HISTORY_
         "last": str(last_n)
     }
     try:
-        print(f"  -> Obteniendo los últimos {last_n} partidos para el equipo ID: {team_id}...")
+        logger.debug(f"📊 Obteniendo últimos {last_n} partidos para equipo {team_id}")
         response = requests.get(url, headers=API_HEADERS, params=params)
         response.raise_for_status()
         time.sleep(0.5) 
-        return response.json().get('response', [])
+        matches = response.json().get('response', [])
+        logger.debug(f"✅ Obtenidos {len(matches)} partidos para equipo {team_id}")
+        return matches
     except requests.exceptions.RequestException as e:
-        print(f"  -> Error al obtener el historial del equipo {team_id}: {e}")
+        logger.error(f"❌ Error obteniendo historial del equipo {team_id}: {e}")
         return []
 
 def _get_odds_from_single_bookmaker(fixture_id: int, bookmaker_id: int) -> List[Dict[str, Any]]:
@@ -57,16 +110,20 @@ def _get_odds_from_single_bookmaker(fixture_id: int, bookmaker_id: int) -> List[
     params = {"fixture": str(fixture_id), "bookmaker": str(bookmaker_id)}
     
     try:
-        print(f"  - Getting odds from bookmaker ID: {bookmaker_id}...")
+        logger.debug(f"💰 Obteniendo cuotas del bookmaker {bookmaker_id} para partido {fixture_id}")
         response = requests.get(url, headers=API_HEADERS, params=params)
         response.raise_for_status()
         time.sleep(0.3)
         odds_response = response.json().get('response', [])
         if odds_response:
-            return odds_response[0]['bookmakers'][0]['bets']
-        return []
+            bets = odds_response[0]['bookmakers'][0]['bets']
+            logger.debug(f"✅ Obtenidas {len(bets)} cuotas del bookmaker {bookmaker_id}")
+            return bets
+        else:
+            logger.warning(f"⚠️ Sin cuotas disponibles del bookmaker {bookmaker_id}")
+            return []
     except (requests.exceptions.RequestException, IndexError) as e:
-        print(f"  - Could not get odds for bookmaker {bookmaker_id}: {e}")
+        logger.error(f"❌ Error obteniendo cuotas del bookmaker {bookmaker_id}: {e}")
         return []
 
 def get_initial_odds(fixture_id: int) -> List[Dict[str, Any]]:
@@ -86,7 +143,7 @@ def find_best_odds_for_market(fixture_id: int, market_info: Dict) -> Dict[str, A
             new_odd = float(target_value['odd'])
             
             if new_odd > best_odd:
-                print(f"  -> Found better odd: {new_odd} from bookmaker {bookmaker_id} (previous was {best_odd})")
+                logger.info(f"🎯 Mejor cuota encontrada: {new_odd} del bookmaker {bookmaker_id} (anterior: {best_odd})")
                 best_odd = new_odd
                 
         except (StopIteration, KeyError):

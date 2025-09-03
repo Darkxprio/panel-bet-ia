@@ -9,7 +9,10 @@ from constants import (
     KELLY_MEDIUM_THRESHOLD,
     MSG_VALUE_FOUND
 )
-from utils import calculate_implied_probability, format_percentage
+from utils import calculate_implied_probability, format_percentage, get_logger
+
+# Logger para predicciones
+logger = get_logger("predictions")
 
 
 def find_value_bet(calculated_prob: float, market_odds: float, margin: float = VALUE_BET_MARGIN) -> bool:
@@ -99,7 +102,7 @@ def create_prediction_entry(match: Dict, features: Any, market: str, prediction:
         f"Edge: {format_percentage(edge)}."
     )
     
-    print(MSG_VALUE_FOUND.format(market, prediction, confidence_level, reasoning))
+    logger.info(f"💰 VALOR ENCONTRADO! Mercado: {market}, Pred: {prediction}, Confianza: {confidence_level}, {reasoning}")
 
     return {
         'fixture_id': match['fixture']['id'],

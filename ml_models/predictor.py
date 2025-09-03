@@ -16,7 +16,10 @@ from constants import (
     DEFAULT_OVER_0_5_FH_PERCENTAGE,
     DEFAULT_OVER_1_5_FH_PERCENTAGE
 )
-from utils import calculate_poisson_probabilities, safe_get_feature
+from utils import calculate_poisson_probabilities, safe_get_feature, get_logger
+
+# Logger para modelos ML
+logger = get_logger("ml_models")
 
 # Importar el predictor avanzado
 try:
@@ -49,15 +52,15 @@ class Predictor:
         if self.use_ensemble:
             try:
                 self.advanced_predictor = AdvancedPredictor()
-                print("🧠 Ensemble Predictor initialized with Advanced ML + Statistical models.")
+                logger.info("🧠 Ensemble Predictor initialized with Advanced ML + Statistical models.")
             except Exception as e:
-                print(f"⚠️ Warning: Could not initialize advanced predictor: {e}")
+                logger.warning(f"⚠️ Could not initialize advanced predictor: {e}")
                 self.use_ensemble = False
                 self.advanced_predictor = None
-                print("🤖 Statistical Predictor initialized (fallback mode).")
+                logger.info("🤖 Statistical Predictor initialized (fallback mode).")
         else:
             self.advanced_predictor = None
-            print("🤖 Statistical Predictor initialized.")
+            logger.info("🤖 Statistical Predictor initialized.")
 
     def predict_winner_probabilities(self, features: pd.Series) -> Dict[str, float]:
         """
@@ -90,30 +93,49 @@ class Predictor:
     
     def _statistical_winner_prediction(self, features: pd.Series) -> Dict[str, float]:
         """
-        Predicción estadística tradicional mejorada.
+        Predicción estadística mejorada usando método Dixon-Coles refinado.
         """
-        # 1. Calcular los goles esperados (lambda) para cada equipo
-        home_attack = safe_get_feature(features, 'home_avg_goals_scored', DEFAULT_GOALS_SCORED)
-        away_defense = safe_get_feature(features, 'away_avg_goals_conceded', DEFAULT_GOALS_CONCEDED)
-        away_attack = safe_get_feature(features, 'away_avg_goals_scored', DEFAULT_GOALS_SCORED)
-        home_defense = safe_get_feature(features, 'home_avg_goals_conceded', DEFAULT_GOALS_CONCEDED)
+        # 1. Intentar usar goles esperados de Dixon-Coles
+        home_exp_goals = safe_get_feature(features, 'home_expected_goals', None)
+        away_exp_goals = safe_get_feature(features, 'away_expected_goals', None)
         
-        home_exp_goals = (home_attack + away_defense) / 2
-        away_exp_goals = (away_attack + home_defense) / 2
+        # Si no hay datos de Dixon-Coles, usar método tradicional
+        if home_exp_goals is None or away_exp_goals is None:
+            logger.debug("Usando método tradicional (Dixon-Coles no disponible)")
+            
+            # Método tradicional como fallback
+            home_attack = safe_get_feature(features, 'home_avg_goals_scored', DEFAULT_GOALS_SCORED)
+            away_defense = safe_get_feature(features, 'away_avg_goals_conceded', DEFAULT_GOALS_CONCEDED)
+            away_attack = safe_get_feature(features, 'away_avg_goals_scored', DEFAULT_GOALS_SCORED)
+            home_defense = safe_get_feature(features, 'home_avg_goals_conceded', DEFAULT_GOALS_CONCEDED)
+            
+            home_exp_goals = (home_attack + away_defense) / 2
+            away_exp_goals = (away_attack + home_defense) / 2
 
-        # 2. Ajustes por forma reciente si disponible
-        home_recent = safe_get_feature(features, 'home_recent_avg_goals_scored', home_attack)
-        away_recent = safe_get_feature(features, 'away_recent_avg_goals_scored', away_attack)
-        
-        # Combinar forma histórica y reciente
-        home_exp_goals = 0.7 * home_exp_goals + 0.3 * home_recent
-        away_exp_goals = 0.7 * away_exp_goals + 0.3 * away_recent
+            # Ajustes por forma reciente
+            home_recent = safe_get_feature(features, 'home_recent_avg_goals_scored', home_attack)
+            away_recent = safe_get_feature(features, 'away_recent_avg_goals_scored', away_attack)
+            
+            # Combinar forma histórica y reciente
+            home_exp_goals = 0.7 * home_exp_goals + 0.3 * home_recent
+            away_exp_goals = 0.7 * away_exp_goals + 0.3 * away_recent
+        else:
+            logger.debug(f"Usando método Dixon-Coles: Local {home_exp_goals:.2f}, Visitante {away_exp_goals:.2f}")
+            
+            # Log información adicional de Dixon-Coles
+            home_attack_strength = safe_get_feature(features, 'home_attack_strength', 1.0)
+            home_defense_strength = safe_get_feature(features, 'home_defense_strength', 1.0)
+            away_attack_strength = safe_get_feature(features, 'away_attack_strength', 1.0)
+            away_defense_strength = safe_get_feature(features, 'away_defense_strength', 1.0)
+            
+            logger.debug(f"Fuerzas: Local Ataque {home_attack_strength:.2f}, Defensa {home_defense_strength:.2f}")
+            logger.debug(f"Fuerzas: Visitante Ataque {away_attack_strength:.2f}, Defensa {away_defense_strength:.2f}")
 
-        # 3. Calcular probabilidades de Poisson para cada equipo
+        # 2. Calcular probabilidades de Poisson para cada equipo
         home_poisson_probs = calculate_poisson_probabilities(home_exp_goals, MAX_GOALS_POISSON)
         away_poisson_probs = calculate_poisson_probabilities(away_exp_goals, MAX_GOALS_POISSON)
 
-        # 4. Calcular probabilidades de cada resultado final
+        # 3. Calcular probabilidades de cada resultado final
         prob_home_win, prob_draw, prob_away_win = 0.0, 0.0, 0.0
         
         for home_goals in range(MAX_GOALS_POISSON + 1):
@@ -127,7 +149,7 @@ class Predictor:
                 else:
                     prob_away_win += score_prob
         
-        # 5. Normalizar para asegurar que la suma sea 1.0
+        # 4. Normalizar para asegurar que la suma sea 1.0
         total_prob = prob_home_win + prob_draw + prob_away_win
         
         if total_prob == 0:
@@ -152,7 +174,7 @@ class Predictor:
             return 0.4 * statistical_pred + 0.6 * advanced_pred
         else:
             return self._statistical_btts_prediction(features)
-    
+
     def predict_over_2_5_probability(self, features: pd.Series) -> float:
         """
         Predice probabilidad de Over 2.5 usando ensemble de modelos.
