@@ -150,3 +150,46 @@ def find_best_odds_for_market(fixture_id: int, market_info: Dict) -> Dict[str, A
             continue
             
     return {'best_odd': best_odd}
+
+def get_season_fixtures(league_id: int, season: int) -> List[Dict[str, Any]]:
+    """
+    Obtiene todos los partidos de una temporada para una liga específica,
+    necesarios para el modelo Dixon-Coles.
+    """
+    url = f"https://{API_HOST}/fixtures"
+    params = {"league": str(league_id), "season": str(season)}
+    start_time = time.time()
+
+    try:
+        logger.info(f"📚 Obteniendo historial completo de la temporada para liga {league_id}, año {season}")
+        response = requests.get(url, headers=API_HEADERS, params=params)
+        response.raise_for_status()
+        
+        response_time = time.time() - start_time
+        all_fixtures = response.json().get('response', [])
+        
+        # Filtramos solo los partidos que ya han terminado (FT) para el análisis
+        finished_fixtures = [f for f in all_fixtures if f['fixture']['status']['short'] == 'FT']
+
+        log_api_call(
+            endpoint="fixtures (season)",
+            params=params,
+            response_time=response_time,
+            status_code=response.status_code,
+            response_size=len(str(all_fixtures))
+        )
+        
+        logger.info(f"✅ Encontrados {len(finished_fixtures)} partidos finalizados para el análisis de la liga.")
+        return finished_fixtures
+
+    except requests.exceptions.RequestException as e:
+        response_time = time.time() - start_time
+        logger.error(f"❌ Error obteniendo los partidos de la temporada para liga {league_id}: {e}")
+        
+        log_api_call(
+            endpoint="fixtures (season)",
+            params=params,
+            response_time=response_time,
+            status_code=getattr(e.response, 'status_code', 0) if hasattr(e, 'response') else 0
+        )
+        return []

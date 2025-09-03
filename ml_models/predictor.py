@@ -91,45 +91,30 @@ class Predictor:
             # Solo predicción estadística
             return self._statistical_winner_prediction(features)
     
-    def _statistical_winner_prediction(self, features: pd.Series) -> Dict[str, float]:
+        def _statistical_winner_prediction(self, match: Dict, league_strengths: Dict) -> Dict[str, float]:
         """
-        Predicción estadística mejorada usando método Dixon-Coles refinado.
+        Predicción estadística usando el modelo inspirado en Dixon-Coles.
+        Depende de las fuerzas de la liga calculadas previamente.
         """
-        # 1. Intentar usar goles esperados de Dixon-Coles
-        home_exp_goals = safe_get_feature(features, 'home_expected_goals', None)
-        away_exp_goals = safe_get_feature(features, 'away_expected_goals', None)
+        home_id = match['teams']['home']['id']
+        away_id = match['teams']['away']['id']
         
-        # Si no hay datos de Dixon-Coles, usar método tradicional
-        if home_exp_goals is None or away_exp_goals is None:
-            logger.debug("Usando método tradicional (Dixon-Coles no disponible)")
-            
-            # Método tradicional como fallback
-            home_attack = safe_get_feature(features, 'home_avg_goals_scored', DEFAULT_GOALS_SCORED)
-            away_defense = safe_get_feature(features, 'away_avg_goals_conceded', DEFAULT_GOALS_CONCEDED)
-            away_attack = safe_get_feature(features, 'away_avg_goals_scored', DEFAULT_GOALS_SCORED)
-            home_defense = safe_get_feature(features, 'home_avg_goals_conceded', DEFAULT_GOALS_CONCEDED)
-            
-            home_exp_goals = (home_attack + away_defense) / 2
-            away_exp_goals = (away_attack + home_defense) / 2
+        team_str = league_strengths.get('teams', {})
+        league_avg = league_strengths.get('league_averages', {})
+        
+        home_team_str = team_str.get(home_id)
+        away_team_str = team_str.get(away_id)
 
-            # Ajustes por forma reciente
-            home_recent = safe_get_feature(features, 'home_recent_avg_goals_scored', home_attack)
-            away_recent = safe_get_feature(features, 'away_recent_avg_goals_scored', away_attack)
-            
-            # Combinar forma histórica y reciente
-            home_exp_goals = 0.7 * home_exp_goals + 0.3 * home_recent
-            away_exp_goals = 0.7 * away_exp_goals + 0.3 * away_recent
-        else:
-            logger.debug(f"Usando método Dixon-Coles: Local {home_exp_goals:.2f}, Visitante {away_exp_goals:.2f}")
-            
-            # Log información adicional de Dixon-Coles
-            home_attack_strength = safe_get_feature(features, 'home_attack_strength', 1.0)
-            home_defense_strength = safe_get_feature(features, 'home_defense_strength', 1.0)
-            away_attack_strength = safe_get_feature(features, 'away_attack_strength', 1.0)
-            away_defense_strength = safe_get_feature(features, 'away_defense_strength', 1.0)
-            
-            logger.debug(f"Fuerzas: Local Ataque {home_attack_strength:.2f}, Defensa {home_defense_strength:.2f}")
-            logger.debug(f"Fuerzas: Visitante Ataque {away_attack_strength:.2f}, Defensa {away_defense_strength:.2f}")
+        # Fallback si las fuerzas no pudieron ser calculadas
+        if not all([home_team_str, away_team_str, league_avg]):
+            logger.warning(f"Dixon-Coles strengths not available for fixture {match['fixture']['id']}. Using default probabilities.")
+            return {'home': 0.45, 'draw': 0.30, 'away': 0.25}
+
+        # 1. Calcular goles esperados usando la fórmula de Dixon-Coles
+        home_exp_goals = home_team_str['attack_home'] * away_team_str['defense_away'] * league_avg['avg_home_goals']
+        away_exp_goals = away_team_str['attack_away'] * home_team_str['defense_home'] * league_avg['avg_away_goals']
+        
+        logger.debug(f"Dixon-Coles Expected Goals: Home {home_exp_goals:.2f}, Away {away_exp_goals:.2f}")
 
         # 2. Calcular probabilidades de Poisson para cada equipo
         home_poisson_probs = calculate_poisson_probabilities(home_exp_goals, MAX_GOALS_POISSON)
@@ -151,9 +136,7 @@ class Predictor:
         
         # 4. Normalizar para asegurar que la suma sea 1.0
         total_prob = prob_home_win + prob_draw + prob_away_win
-        
         if total_prob == 0:
-            # Fallback en caso de error
             return {'home': 0.33, 'draw': 0.34, 'away': 0.33}
         
         return {

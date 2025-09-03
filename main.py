@@ -1,9 +1,3 @@
-"""
-Pipeline principal para Panel Bet IA
-
-Ejecuta el proceso diario de análisis y predicción de apuestas deportivas.
-"""
-
 from datetime import date, datetime, timedelta
 from typing import Dict, Any, List
 import time
@@ -33,23 +27,12 @@ from utils import (
     log_prediction_result
 )
 
-# Configurar logging al inicio
 logger = setup_logging("panel_bet_ia", level="INFO")
 api_logger = get_logger("api")
 predictions_logger = get_logger("predictions")
 
 
 def _validate_league_maturity(league_id: int, today: date) -> Dict[str, Any]:
-    """
-    Valida si una liga es lo suficientemente madura para hacer predicciones.
-    
-    Args:
-        league_id: ID de la liga
-        today: Fecha actual
-        
-    Returns:
-        Diccionario con is_valid y season
-    """
     league_details = api_service.get_league_details(league_id)
     is_valid, season = False, None
     
@@ -65,22 +48,6 @@ def _validate_league_maturity(league_id: int, today: date) -> Dict[str, Any]:
 
 
 def _analyze_all_markets(match: Dict, features: Any, initial_bets: List, prob_winner: Dict, prob_btts: float, prob_over_2_5: float, prob_over_0_5_fh: float, prob_over_1_5_fh: float) -> List[Dict]:
-    """
-    Analiza todos los mercados disponibles en busca de valor.
-    
-    Args:
-        match: Datos del partido
-        features: Características calculadas
-        initial_bets: Cuotas iniciales
-        prob_winner: Probabilidades 1X2
-        prob_btts: Probabilidad BTTS
-        prob_over_2_5: Probabilidad Over 2.5
-        prob_over_0_5_fh: Probabilidad Over 0.5 FH
-        prob_over_1_5_fh: Probabilidad Over 1.5 FH
-        
-    Returns:
-        Lista de predicciones con valor
-    """
     valuable_predictions = []
     
     try:
@@ -135,18 +102,6 @@ def _analyze_all_markets(match: Dict, features: Any, initial_bets: List, prob_wi
 
 
 def run_daily_pipeline():
-    """
-    Ejecuta el pipeline diario de predicción de apuestas.
-    
-    Proceso:
-    1. Obtiene partidos del día
-    2. Filtra ligas maduras
-    3. Obtiene historial de equipos
-    4. Genera características
-    5. Predice probabilidades
-    6. Busca apuestas de valor
-    7. Guarda predicciones
-    """
     start_time = time.time()
     logger.info("🚀 Iniciando el pipeline de predicción diaria...")
     today = date.today()
@@ -187,38 +142,55 @@ def run_daily_pipeline():
             league_info = league_info_cache.get(league_id)
             
             if not league_info:
+                logger.debug(f"Liga {league_id} no está en caché. Realizando análisis completo...")
+                
+                # 1. Usar tu función para la validación inicial (¡Correcto!)
                 league_info = _validate_league_maturity(league_id, today)
+                
+                # 2. Si es válida, ENRIQUECERLA con las fuerzas de la liga
+                if league_info['is_valid']:
+                    season_year = league_info['season']
+                    season_fixtures = api_service.get_season_fixtures(league_id, season_year)
+                    
+                    if len(season_fixtures) > 30:
+                        strengths = calculate_league_strengths(season_fixtures)
+                        # Añadir las fuerzas al diccionario de información de la liga
+                        league_info['strengths'] = strengths
+                        if not strengths:
+                            league_info['is_valid'] = False # Marcar como inválida si no se pudieron calcular
+                    else:
+                        league_info['is_valid'] = False # No hay suficientes partidos en la temporada
+                
+                # 3. Guardar la información completa (o la invalidación) en el caché
                 league_info_cache[league_id] = league_info
             
-            if not league_info['is_valid']:
-                logger.info(f"⏭️ Liga {league_id} no suficientemente madura, omitiendo")
+            if not league_info['is_valid'] or not league_info.get('strengths'):
+                logger.info(f"⏭️ Liga {league_id} no tiene suficientes datos para el modelo Dixon-Coles.")
                 continue
             
             # Obtener historial de equipos
             season_year = league_info['season']
+            league_strengths = league_info['strengths']
             home_history = api_service.get_team_last_matches(match['teams']['home']['id'], season_year, last_n=20)
             away_history = api_service.get_team_last_matches(match['teams']['away']['id'], season_year, last_n=20)
             
             if len(home_history) < MIN_MATCHES_REQUIRED or len(away_history) < MIN_MATCHES_REQUIRED:
-                logger.info(f"⏭️ {teams}: Datos históricos insuficientes (H:{len(home_history)}, A:{len(away_history)})")
+                logger.info(f"⏭️ {teams}: Datos históricos insuficientes.")
                 continue
             
             # Generar características
-            features = create_feature_vector(match, home_history, away_history)
+            features = create_feature_vector(match, home_history, away_history, league_strengths)
             if features.empty:
-                logger.warning(f"⚠️ {teams}: No se pudieron generar características")
+                logger.warning(f"⚠️ {teams}: No se pudieron generar características.")
                 continue
-            
-            logger.debug(f"📊 {teams}: Generadas {len(features)} características")
             
             # Obtener cuotas
             initial_bets = api_service.get_initial_odds(match['fixture']['id'])
-            if not initial_bets or not validate_odds_data(initial_bets):
-                logger.info(f"⏭️ {teams}: Sin cuotas disponibles del bookmaker primario")
+            if not initial_bets:
+                logger.info(f"⏭️ {teams}: Sin cuotas disponibles del bookmaker primario.")
                 continue
 
             # Realizar predicciones
-            logger.debug(f"🤖 {teams}: Generando predicciones...")
             prob_winner = predictor.predict_winner_probabilities(features)
             prob_btts = predictor.predict_btts_probability(features)
             prob_over_2_5 = predictor.predict_over_2_5_probability(features)
