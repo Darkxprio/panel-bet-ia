@@ -4,7 +4,7 @@ import time
 
 from services import api_service, db_service
 from ml_models.predictor import Predictor
-from data_processing.feature_engineering import create_feature_vector
+from data_processing.feature_engineering import create_feature_vector, calculate_league_strengths
 from helpers import find_value_bet, create_prediction_entry
 from constants import (
     MIN_MATCHES_REQUIRED,
@@ -32,19 +32,26 @@ api_logger = get_logger("api")
 predictions_logger = get_logger("predictions")
 
 
-def _validate_league_maturity(league_id: int, today: date) -> Dict[str, Any]:
-    league_details = api_service.get_league_details(league_id)
-    is_valid, season = False, None
+def _validate_and_enrich_league(league_details: Dict, today: date) -> Dict:
+    """
+    Valida la madurez de la liga y la enriquece con las fuerzas de Dixon-Coles.
+    """
+    is_valid, season, strengths = False, None, {}
     
     if league_details:
         current_season = next((s for s in league_details.get('seasons', []) if s.get('current')), None)
         if current_season:
             season = current_season['year']
             start = datetime.strptime(current_season['start'], '%Y-%m-%d').date()
+            
             if (today - start) > timedelta(days=MIN_LEAGUE_MATURITY_DAYS):
-                is_valid = True
-    
-    return {'is_valid': is_valid, 'season': season}
+                season_fixtures = api_service.get_season_fixtures(league_details['league']['id'], season)
+                if len(season_fixtures) > 30:
+                    strengths = calculate_league_strengths(season_fixtures)
+                    is_valid = True if strengths else False
+
+    # Guardamos los detalles completos de la liga para usarlos en las features
+    return {'is_valid': is_valid, 'season': season, 'strengths': strengths, 'details': league_details}
 
 
 def _analyze_all_markets(match: Dict, features: Any, initial_bets: List, prob_winner: Dict, prob_btts: float, prob_over_2_5: float, prob_over_0_5_fh: float, prob_over_1_5_fh: float) -> List[Dict]:
@@ -104,7 +111,7 @@ def _analyze_all_markets(match: Dict, features: Any, initial_bets: List, prob_wi
 def run_daily_pipeline():
     start_time = time.time()
     logger.info("🚀 Iniciando el pipeline de predicción diaria...")
-    today = date.today()
+    today = date.today() - timedelta(days=1) # <-- USA ESTA LÍNEA (para probar con los datos de ayer)
     
     # Inicializar predictor
     try:
@@ -144,15 +151,21 @@ def run_daily_pipeline():
             if not league_info:
                 logger.debug(f"Liga {league_id} no está en caché. Realizando análisis completo...")
                 
-                # 1. Usar tu función para la validación inicial (¡Correcto!)
-                league_info = _validate_league_maturity(league_id, today)
+                 # Obtenemos todos los detalles de la liga
+                league_details = api_service.get_league_details(league_id)
                 
-                # 2. Si es válida, ENRIQUECERLA con las fuerzas de la liga
+                # Usamos una función de ayuda para la validación y el enriquecimiento
+                league_info = _validate_and_enrich_league(league_details, today)
+                
+                # Guardar la información completa en el caché
+                league_info_cache[league_id] = league_info
+                
+                # Si es válida, ENRIQUECERLA con las fuerzas de la liga
                 if league_info['is_valid']:
                     season_year = league_info['season']
                     season_fixtures = api_service.get_season_fixtures(league_id, season_year)
                     
-                    if len(season_fixtures) > 30:
+                    if len(season_fixtures) > 20:
                         strengths = calculate_league_strengths(season_fixtures)
                         # Añadir las fuerzas al diccionario de información de la liga
                         league_info['strengths'] = strengths
@@ -161,7 +174,7 @@ def run_daily_pipeline():
                     else:
                         league_info['is_valid'] = False # No hay suficientes partidos en la temporada
                 
-                # 3. Guardar la información completa (o la invalidación) en el caché
+                # Guardar la información completa (o la invalidación) en el caché
                 league_info_cache[league_id] = league_info
             
             if not league_info['is_valid'] or not league_info.get('strengths'):
@@ -179,7 +192,7 @@ def run_daily_pipeline():
                 continue
             
             # Generar características
-            features = create_feature_vector(match, home_history, away_history, league_strengths)
+            features = create_feature_vector(match, home_history, away_history, league_info['strengths'],league_info['details'])
             if features.empty:
                 logger.warning(f"⚠️ {teams}: No se pudieron generar características.")
                 continue
@@ -191,13 +204,15 @@ def run_daily_pipeline():
                 continue
 
             # Realizar predicciones
-            prob_winner = predictor.predict_winner_probabilities(features)
+             # 1. Realizar todas las predicciones pasando los argumentos correctos
+            logger.debug(f"🤖 {teams}: Generando predicciones...")
+            prob_winner = predictor.predict_winner_probabilities(match, features, league_strengths)
             prob_btts = predictor.predict_btts_probability(features)
             prob_over_2_5 = predictor.predict_over_2_5_probability(features)
             prob_over_0_5_fh = predictor.predict_over_0_5_fh_probability(features)
             prob_over_1_5_fh = predictor.predict_over_1_5_fh_probability(features)
 
-            # Analizar mercados en busca de valor
+            # 2. Analizar mercados pasando las probabilidades ya calculadas
             logger.debug(f"💰 {teams}: Buscando oportunidades de valor...")
             market_predictions = _analyze_all_markets(
                 match, features, initial_bets, 

@@ -179,14 +179,60 @@ def _calculate_comparative_metrics(home_metrics: pd.Series, away_metrics: pd.Ser
         'form_difference': home_metrics.get('recent_points_per_game', 1.5) - away_metrics.get('recent_points_per_game', 1.5)
     }
 
-def _calculate_contextual_factors(match_data: Dict[str, Any]) -> Dict[str, float]:
+def _calculate_contextual_factors(
+    match_data: Dict, 
+    league_details: Dict,
+    home_history: List,
+    away_history: List
+) -> Dict:
+    contextual = {}
+    
+    # --- 1. Features de Tiempo (Día, Hora, Mes) ---
     try:
         match_date = datetime.fromisoformat(match_data['fixture']['date'].replace('Z', '+00:00'))
-        is_weekend = 1.0 if match_date.weekday() >= 5 else 0.0
+        contextual['day_of_week'] = match_date.weekday()
+        contextual['is_weekend'] = 1.0 if match_date.weekday() >= 5 else 0.0
+        contextual['month'] = match_date.month
     except (KeyError, ValueError):
-        is_weekend = 0.0
+        contextual['day_of_week'] = 3
+        contextual['is_weekend'] = 0.0
+        contextual['month'] = 6
 
-    return {'is_weekend': is_weekend}
+    # --- 2. Features de Competición (Tipo y Progreso) ---
+    try:
+        # competition_type: 1 para Liga, 2 para Copa
+        contextual['competition_type'] = 1.0 if league_details['league']['type'] == 'League' else 2.0
+        
+        # season_progress: 0.0 (inicio) a 1.0 (final)
+        season_info = next((s for s in league_details.get('seasons', []) if s.get('current')), None)
+        start_date = datetime.strptime(season_info['start'], '%Y-%m-%d').date()
+        end_date = datetime.strptime(season_info['end'], '%Y-%m-%d').date()
+        today = datetime.now().date()
+        
+        total_duration = (end_date - start_date).days
+        elapsed_duration = (today - start_date).days
+        contextual['season_progress'] = elapsed_duration / total_duration if total_duration > 0 else 0.5
+    except (KeyError, TypeError, StopIteration):
+        contextual['competition_type'] = 1.0
+        contextual['season_progress'] = 0.5
+
+    # --- 3. Features de Fatiga y Descanso ---
+    def get_days_since_last_match(history: List, current_match_date_str: str) -> float:
+        if not history:
+            return 7.0 # Valor por defecto si no hay historial
+        last_match_date = datetime.fromisoformat(history[0]['fixture']['date'].replace('Z', '+00:00'))
+        current_match_date = datetime.fromisoformat(current_match_date_str.replace('Z', '+00:00'))
+        return (current_match_date - last_match_date).days
+
+    home_last_match_days = get_days_since_last_match(home_history, match_data['fixture']['date'])
+    away_last_match_days = get_days_since_last_match(away_history, match_data['fixture']['date'])
+    
+    contextual['home_days_since_last_match'] = home_last_match_days
+    contextual['away_days_since_last_match'] = away_last_match_days
+    # rest_day_advantage: positivo = ventaja local, negativo = ventaja visitante
+    contextual['rest_day_advantage'] = home_last_match_days - away_last_match_days
+
+    return contextual
 
 def calculate_league_strengths(season_fixtures: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not season_fixtures:
@@ -242,7 +288,8 @@ def create_feature_vector(
     match_data: Dict[str, Any], 
     home_team_history: List[Dict[str, Any]], 
     away_team_history: List[Dict[str, Any]],
-    league_strengths: Dict[str, Any]
+    league_strengths: Dict[str, Any],
+    league_details: Dict[str, Any]
 ) -> pd.Series:
     home_id = match_data['teams']['home']['id']
     away_id = match_data['teams']['away']['id']
@@ -251,7 +298,7 @@ def create_feature_vector(
     away_metrics = calculate_team_performance_metrics(away_team_history, away_id)
     h2h_stats = _calculate_head_to_head_stats(home_team_history, away_team_history, home_id, away_id)
     comparative_metrics = _calculate_comparative_metrics(home_metrics, away_metrics)
-    contextual_factors = _calculate_contextual_factors(match_data)
+    contextual_factors = _calculate_contextual_factors(match_data, league_details, home_history, away_history)
     
     team_strengths = league_strengths.get('teams', {})
     league_averages = league_strengths.get('league_averages', {})

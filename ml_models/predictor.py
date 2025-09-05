@@ -91,59 +91,85 @@ class Predictor:
             # Solo predicción estadística
             return self._statistical_winner_prediction(features)
     
-        def _statistical_winner_prediction(self, match: Dict, league_strengths: Dict) -> Dict[str, float]:
-        """
-        Predicción estadística usando el modelo inspirado en Dixon-Coles.
-        Depende de las fuerzas de la liga calculadas previamente.
-        """
-        home_id = match['teams']['home']['id']
-        away_id = match['teams']['away']['id']
+def _statistical_winner_prediction(self, match: Dict, features: pd.Series, league_strengths: Dict) -> Dict[str, float]:
+    """
+    Predicción estadística HÍBRIDA.
+    - Usa Dixon-Coles si hay suficientes datos de la liga.
+    - Usa un modelo de forma/historial si la temporada es muy joven.
+    """
+    home_id = match['teams']['home']['id']
+    away_id = match['teams']['away']['id']
+    
+    # --- MODO 1: TEMPORADA MADURA (USA DIXON-COLES) ---
+    if league_strengths and league_strengths.get('teams'):
+        logger.debug(f"Usando modelo Dixon-Coles para {match['fixture']['id']}")
         
-        team_str = league_strengths.get('teams', {})
-        league_avg = league_strengths.get('league_averages', {})
-        
+        team_str = league_strengths['teams']
+        league_avg = league_strengths['league_averages']
         home_team_str = team_str.get(home_id)
         away_team_str = team_str.get(away_id)
 
-        # Fallback si las fuerzas no pudieron ser calculadas
         if not all([home_team_str, away_team_str, league_avg]):
-            logger.warning(f"Dixon-Coles strengths not available for fixture {match['fixture']['id']}. Using default probabilities.")
-            return {'home': 0.45, 'draw': 0.30, 'away': 0.25}
+            logger.warning(f"Faltan datos de fuerza, usando fallback para {match['fixture']['id']}")
+            # Si falla, pasa al Modo 2
+        else:
+            home_exp_goals = home_team_str['attack_home'] * away_team_str['defense_away'] * league_avg['avg_home_goals']
+            away_exp_goals = away_team_str['attack_away'] * home_team_str['defense_home'] * league_avg['avg_away_goals']
+            
+            home_poisson_probs = calculate_poisson_probabilities(home_exp_goals, MAX_GOALS_POISSON)
+            away_poisson_probs = calculate_poisson_probabilities(away_exp_goals, MAX_GOALS_POISSON)
 
-        # 1. Calcular goles esperados usando la fórmula de Dixon-Coles
-        home_exp_goals = home_team_str['attack_home'] * away_team_str['defense_away'] * league_avg['avg_home_goals']
-        away_exp_goals = away_team_str['attack_away'] * home_team_str['defense_home'] * league_avg['avg_away_goals']
-        
-        logger.debug(f"Dixon-Coles Expected Goals: Home {home_exp_goals:.2f}, Away {away_exp_goals:.2f}")
+            prob_home_win, prob_draw, prob_away_win = 0.0, 0.0, 0.0
+            
+            for hg in range(MAX_GOALS_POISSON + 1):
+                for ag in range(MAX_GOALS_POISSON + 1):
+                    score_prob = home_poisson_probs[hg] * away_poisson_probs[ag]
+                    if hg > ag: prob_home_win += score_prob
+                    elif hg == ag: prob_draw += score_prob
+                    else: prob_away_win += score_prob
+            
+            total_prob = prob_home_win + prob_draw + prob_away_win
+            if total_prob > 0:
+                return {
+                    'home': prob_home_win / total_prob,
+                    'draw': prob_draw / total_prob,
+                    'away': prob_away_win / total_prob
+                }
 
-        # 2. Calcular probabilidades de Poisson para cada equipo
-        home_poisson_probs = calculate_poisson_probabilities(home_exp_goals, MAX_GOALS_POISSON)
-        away_poisson_probs = calculate_poisson_probabilities(away_exp_goals, MAX_GOALS_POISSON)
+    # --- MODO 2: INICIO DE TEMPORADA (FALLBACK A MODELO DE FORMA) ---
+    logger.debug(f"Usando modelo de FORMA RECIENTE para {match['fixture']['id']} (inicio de temporada)")
 
-        # 3. Calcular probabilidades de cada resultado final
-        prob_home_win, prob_draw, prob_away_win = 0.0, 0.0, 0.0
+    # Usamos las features de forma reciente que ya calculaste
+    home_attack = safe_get_feature(features, 'home_recent_avg_goals_scored', 1.2)
+    away_defense = safe_get_feature(features, 'away_recent_avg_goals_conceded', 1.2)
+    away_attack = safe_get_feature(features, 'away_recent_avg_goals_scored', 1.0)
+    home_defense = safe_get_feature(features, 'home_recent_avg_goals_conceded', 1.2)
+
+    home_exp_goals = (home_attack + away_defense) / 2
+    away_exp_goals = (away_attack + home_defense) / 2
+    
+    # Reutilizamos el cálculo de Poisson con estos goles esperados más simples
+    home_poisson_probs = calculate_poisson_probabilities(home_exp_goals, MAX_GOALS_POISSON)
+    away_poisson_probs = calculate_poisson_probabilities(away_exp_goals, MAX_GOALS_POISSON)
+    
+    prob_home_win, prob_draw, prob_away_win = 0.0, 0.0, 0.0
+    
+    for hg in range(MAX_GOALS_POISSON + 1):
+        for ag in range(MAX_GOALS_POISSON + 1):
+            score_prob = home_poisson_probs[hg] * away_poisson_probs[ag]
+            if hg > ag: prob_home_win += score_prob
+            elif hg == ag: prob_draw += score_prob
+            else: prob_away_win += score_prob
+
+    total_prob = prob_home_win + prob_draw + prob_away_win
+    if total_prob == 0:
+        return {'home': 0.33, 'draw': 0.34, 'away': 0.33}
         
-        for home_goals in range(MAX_GOALS_POISSON + 1):
-            for away_goals in range(MAX_GOALS_POISSON + 1):
-                score_prob = home_poisson_probs[home_goals] * away_poisson_probs[away_goals]
-                
-                if home_goals > away_goals:
-                    prob_home_win += score_prob
-                elif home_goals == away_goals:
-                    prob_draw += score_prob
-                else:
-                    prob_away_win += score_prob
-        
-        # 4. Normalizar para asegurar que la suma sea 1.0
-        total_prob = prob_home_win + prob_draw + prob_away_win
-        if total_prob == 0:
-            return {'home': 0.33, 'draw': 0.34, 'away': 0.33}
-        
-        return {
-            'home': prob_home_win / total_prob,
-            'draw': prob_draw / total_prob,
-            'away': prob_away_win / total_prob
-        }
+    return {
+        'home': prob_home_win / total_prob,
+        'draw': prob_draw / total_prob,
+        'away': prob_away_win / total_prob
+    }
 
     def predict_btts_probability(self, features: pd.Series) -> float:
         """
