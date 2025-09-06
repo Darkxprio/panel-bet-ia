@@ -1,6 +1,10 @@
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import pandas as pd
 import time
-import os
 import json
 from services import api_service
 from data_processing.feature_engineering import calculate_league_strengths, create_feature_vector
@@ -10,7 +14,7 @@ logger = get_logger("data_collector")
 
 SEASONS_TO_CHECK = [2024, 2023, 2022] 
 
-def create_training_dataset(output_path: str):
+def create_training_dataset(leagues_to_collect: list, output_path: str):
     """
     Recolecta datos históricos de todas las ligas posibles, procesa las features
     y guarda el resultado en un dataset de entrenamiento reanudable.
@@ -102,4 +106,6 @@ def create_training_dataset(output_path: str):
     logger.info("✅ Proceso de recolección de datos finalizado.")
 
 if __name__ == "__main__":
-    create_training_dataset('data/training_dataset.csv')
+        from constants import LEAGUES_TO_COLLECT_TEST 
+
+    create_training_dataset(LEAGUES_TO_COLLECT_TEST, 'data/training_dataset.csv')

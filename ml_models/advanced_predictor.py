@@ -15,7 +15,7 @@ from sklearn.model_selection import cross_val_score
 import warnings
 warnings.filterwarnings('ignore')
 
-from utils import get_logger, calculate_poisson_probabilities, safe_get_feature
+from utils import get_logger
 logger = get_logger("advanced_predictor")
 
 from constants import (

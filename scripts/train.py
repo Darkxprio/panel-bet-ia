@@ -1,9 +1,13 @@
-# train.py
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
 import joblib
+import argparse # <-- Importamos argparse
 from ml_models.advanced_predictor import AdvancedPredictor
-from utils import get_logger
+from utils import get_logger, calculate_poisson_probabilities, safe_get_feature
 
 logger = get_logger("trainer")
 
@@ -44,4 +48,9 @@ def train_models(dataset_path: str, model_output_path: str):
     logger.info(f"🧠 Predictor avanzado entrenado y guardado en: {model_output_path}")
 
 if __name__ == "__main__":
-    train_models('data/training_dataset.csv', 'ml_models/trained_advanced_predictor.pkl')
+        parser = argparse.ArgumentParser(description="Entrenar los modelos de ML del Advanced Predictor.")
+    parser.add_argument("--dataset", type=str, required=True, help="Ruta al archivo CSV del dataset de entrenamiento.")
+    parser.add_argument("--output", type=str, required=True, help="Ruta donde se guardará el modelo entrenado (.pkl).")
+    
+    args = parser.parse_args()
+    train_models(args.dataset, args.output)

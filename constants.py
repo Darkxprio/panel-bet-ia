@@ -56,3 +56,7 @@ MSG_NO_FEATURES = "Omitiendo: No se pudieron generar las características."
 MSG_NO_ODDS = "Omitiendo: No hay cuotas disponibles del bookmaker primario."
 MSG_VALUE_FOUND = "¡VALOR ENCONTRADO! Mercado: {}, Pred: {}, Confianza: {}, {}"
 MSG_PARSING_ERROR = "Omitiendo: No se pudieron parsear las cuotas necesarias del bookmaker primario. Error: {}"
+
+LEAGUES_TO_COLLECT_TEST = [
+    {'id': 39, 'name': 'Premier League', 'seasons': [2024]},
+]
