@@ -15,6 +15,9 @@ from sklearn.model_selection import cross_val_score
 import warnings
 warnings.filterwarnings('ignore')
 
+from utils import get_logger, calculate_poisson_probabilities, safe_get_feature
+logger = get_logger("advanced_predictor")
+
 from constants import (
     MAX_GOALS_POISSON,
     DEFAULT_GOALS_SCORED,
@@ -24,7 +27,6 @@ from constants import (
     DEFAULT_OVER_0_5_FH_PERCENTAGE,
     DEFAULT_OVER_1_5_FH_PERCENTAGE
 )
-from utils import calculate_poisson_probabilities, safe_get_feature
 
 
 class AdvancedPredictor:
@@ -42,9 +44,6 @@ class AdvancedPredictor:
         # Inicializar modelos para diferentes mercados
         self._initialize_models()
         
-        from utils import get_logger
-        logger = get_logger("ml_models")
-        logger.info("🧠 Advanced AI Predictor initialized with ensemble methods.")
     
     def _initialize_models(self):
         """Inicializa los modelos de ML para cada mercado."""

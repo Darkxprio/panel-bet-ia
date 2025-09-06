@@ -193,3 +193,18 @@ def get_season_fixtures(league_id: int, season: int) -> List[Dict[str, Any]]:
             status_code=getattr(e.response, 'status_code', 0) if hasattr(e, 'response') else 0
         )
         return []
+
+def get_all_leagues() -> List[Dict[str, Any]]:
+    url = f"https://{API_HOST}/leagues"
+    params = {"type": "league"}
+    
+    logger.info("🌍 Obteniendo la lista de todas las ligas del mundo (excluyendo copas)...")
+    try:
+        response = requests.get(url, headers=API_HEADERS, params=params)
+        response.raise_for_status()
+        leagues = response.json().get('response', [])
+        logger.info(f"✅ Se encontraron {len(leagues)} ligas en total.")
+        return leagues
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ Error obteniendo la lista de todas las ligas: {e}")
+        return []

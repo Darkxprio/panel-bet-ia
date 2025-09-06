@@ -111,7 +111,7 @@ def _analyze_all_markets(match: Dict, features: Any, initial_bets: List, prob_wi
 def run_daily_pipeline():
     start_time = time.time()
     logger.info("🚀 Iniciando el pipeline de predicción diaria...")
-    today = date.today() - timedelta(days=1) # <-- USA ESTA LÍNEA (para probar con los datos de ayer)
+    today = date.today()
     
     # Inicializar predictor
     try:
